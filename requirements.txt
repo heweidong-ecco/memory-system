@@ -1,0 +1,25 @@
+# 分层记忆系统架构依赖（Python 3.9，2026-08-16 验证可复现）
+# 安装：pip install -r requirements.txt
+# 修正说明：去掉 pip/setuptools 版本锁定；requests 版本号去掉多余空格；补充 python-dotenv（代码中有 from dotenv import load_dotenv）
+
+# ---- 数据库 ----
+psycopg2-binary==2.9.12          # PostgreSQL 驱动
+redis==7.0.1                     # Redis 热缓存
+
+# ---- 语义/检索 ----
+jieba==0.42.1                    # 中文分词（BM25）
+rank-bm25==0.2.2                 # BM25 关键词检索
+PyYAML==6.0.3                    # SKILL.md YAML 元数据解析
+
+# ---- HTTP / LLM ----
+requests==2.32.5                 # 调用 Ollama embedding / DeepSeek
+python-dotenv==1.2.1              # 读取 .env（DEEPSEEK_API_KEY 等）
+
+# ---- 测试 ----
+pytest==8.4.2
+
+# ---- 传递依赖（requests 等自动引入，显式列出便于复现）----
+certifi==2026.7.22
+charset-normalizer==3.5.0
+idna==3.18
+urllib3==2.6.3

@@ -1,0 +1,22 @@
+services:
+  memory-db:
+    image: pgvector/pgvector:pg16
+    container_name: memory-db
+    environment:
+      POSTGRES_PASSWORD: memory_pass_2026
+      POSTGRES_DB: memory_system
+      POSTGRES_USER: memory_user
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: memory-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    restart: unless-stopped

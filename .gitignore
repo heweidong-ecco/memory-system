@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虚拟环境
+memory-system-venv/
+.venv/
+
+# 环境变量（含密钥）
+.env
+
+# 数据库本地数据（docker volume）
+data/db/
+data/redis/
+
+# 测试/运行产物
+perf_baselines.json
+.pytest_cache/
+
+# 临时脚本与文件（如需保留请删除下一行）
+1.py
+
+# 编辑器/系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
