@@ -40,30 +40,129 @@ pytest                          # 26 个用例（配置见 pytest.ini）
 
 ## 架构一览
 
-```mermaid
-flowchart LR
-    subgraph 入口
-        A[unified_api.record_event] --> B[event_bus.EventBus]
-        C[unified_api.query_memory] --> D[retrieval_orchestrator.unified_search]
-    end
+### 分层记忆系统架构设计文档
 
-    B --> L[ledger 账本<br/>Append-Only 触发器]
-    B --> R[redis 热缓存<br/>kv/tool/skill:{user_id}:...]
+#### 1. 概述
 
-    D --> E1[1 KV 精准]
-    D --> E2[2 Summary 摘要]
-    D --> E3[3 Ledger 回溯]
-    D --> E4[4 Skills 复用<br/>skills/{user_id}/]
-    D --> E5[5 RAG 条件性<br/>tenant_id 隔离]
+本系统旨在为 AI Agent 提供一套**分层、多级、可回溯**的记忆管理方案。通过将不同粒度和时效性的记忆数据分离存储，并在查询时按优先级进行融合检索，实现高效、准确且可扩展的记忆能力。
 
-    E1 --> K[(user_profile)]
-    E2 --> S[(summary)]
-    E3 --> L
-    E4 --> P[(skill_candidate_vectors<br/>skill_snapshots)]
-    E5 --> G[(rag_knowledge_base)]
+核心设计理念：
 
-    B --成功 tool/skill--> P
-```
+- **写入与查询分离**：统一写入入口，异步分发；查询时多路召回，按策略融合。
+- **事件溯源**：以 Append-Only 日志（Ledger）作为底层事实来源，保证可回溯与审计。
+- **多级缓存**：Redis 热缓存加速高频访问，关系型/向量数据库承载持久化与语义检索。
+- **技能沉淀**：从用户交互中提取可复用的工具调用或行为模式，形成“技能库”，供后续快速复用。
+- **多租户隔离**：所有数据按 `user_id` / `tenant_id` 隔离，保证数据安全。
+
+---
+
+#### 2. 总体架构图
+
+![总体架构图](docs/总体架构图.png)
+
+**说明**：  
+- 写入时，`record_event` 将事件推入 `EventBus`，由总线负责分发到多个存储。  
+- 查询时，`query_memory` 调用 `unified_search`，依次尝试多种检索策略，并最终融合结果。
+
+---
+
+#### 3. 核心模块说明
+
+| 模块                     | 职责                                 | 关键技术                      |
+| ------------------------ | ------------------------------------ | ----------------------------- |
+| `unified_api`            | 统一对外接口，提供事件记录和记忆查询 | Python / FastAPI              |
+| `EventBus`               | 事件分发，解耦写入路径               | 自定义事件总线 / Redis Stream |
+| `Retrieval Orchestrator` | 编排多路检索，融合排序               | Python 策略链                 |
+| `Ledger`                 | 追加式事件日志，不可变，保证可回溯   | PostgreSQL / SQLite           |
+| `Redis`                  | 热数据缓存，加速频繁读取             | Redis                         |
+| `Summary`                | 对话摘要，提供概括性记忆             | LLM 生成 + 存储               |
+| `Skill System`           | 技能候选向量与快照，实现技能复用     | 向量数据库 + 元数据           |
+| `RAG Knowledge Base`     | 外部知识库，按租户隔离               | 向量数据库 + 元数据           |
+
+---
+
+#### 4. 数据流详解
+
+##### 4.1 写入流程（record_event）
+
+![写入流程](docs/写入流程.png)
+
+**步骤说明**：
+
+1. `unified_api.record_event` 接收标准化事件（含 `user_id`、`event_type`、`payload`、`timestamp`）。
+2. `EventBus` 将事件分发到多个下游处理器。
+3. `Ledger` 无条件追加事件，确保所有事实可回溯。
+4. `Redis` 更新对应键值，如 `kv:user_123:location`。
+5. 若事件类型为 `tool` 或 `skill` 且执行成功，则触发技能沉淀流程，将工具调用模式写入技能候选向量库和快照表。
+
+##### 4.2 查询流程（query_memory）
+
+![查询流程](docs/查询流程.png)
+
+**策略优先级**：从最快、最精确到最慢、最模糊。
+
+| 优先级 | 策略         | 数据源                  | 适用场景                               |
+| ------ | ------------ | ----------------------- | -------------------------------------- |
+| 1      | KV 精准      | User Profile            | 用户显式设定的固定属性（如位置、偏好） |
+| 2      | Summary 摘要 | Summary 表              | 对话总结、近期意图                     |
+| 3      | Ledger 回溯  | Ledger 日志             | 历史事件细节、精确时间线               |
+| 4      | Skills 复用  | Skill Candidate Vectors | 与历史成功工具调用相似的任务           |
+| 5      | RAG 条件性   | RAG Knowledge Base      | 外部知识，需按 `tenant_id` 隔离        |
+
+**条件性 RAG 触发**：当本地记忆均无法提供满意答案，或查询涉及通用知识时启用。
+
+---
+
+#### 5. 存储设计
+
+| 存储                      | 类型                  | 关键字段                                                    | 说明                             |
+| ------------------------- | --------------------- | ----------------------------------------------------------- | -------------------------------- |
+| `user_profile`            | 关系型 / KV           | `key`, `value`, `user_id`                                   | 精准事实，如 `user_123.location` |
+| `summary`                 | 关系型                | `user_id`, `summary_text`, `updated_at`                     | 摘要记忆，定期更新               |
+| `ledger`                  | 关系型（Append-Only） | `event_id`, `user_id`, `event_type`, `payload`, `timestamp` | 不可变事件流                     |
+| `skill_candidate_vectors` | 向量数据库            | `embedding`, `user_id`, `metadata`                          | 技能候选的语义表示               |
+| `skill_snapshots`         | 关系型 / 对象存储     | `skill_id`, `snapshot`, `created_at`                        | 已确认技能的完整快照             |
+| `rag_knowledge_base`      | 向量数据库            | `embedding`, `tenant_id`, `doc_id`                          | 外部知识，租户隔离               |
+
+---
+
+#### 6. 关键设计细节
+
+##### 6.1 技能沉淀机制
+当 Agent 成功执行某个工具或产生某个技能时，系统会：
+1. 将工具调用的输入/输出/描述向量化，存入 `skill_candidate_vectors`。
+2. 若该候选技能被多次成功验证，则生成 `skill_snapshot`，作为稳定技能供后续直接调用。
+
+##### 6.2 多租户隔离
+所有涉及共享知识的数据（如 RAG 知识库）都带有 `tenant_id` 字段，确保不同租户之间的数据严格隔离。  
+查询时必须携带 `tenant_id`，否则返回空结果。
+
+##### 6.3 缓存策略
+Redis 中键名格式为 `{type}:{user_id}:{key}`，例如：
+- `kv:user_123:location` → 用户位置
+- `tool:user_123:last_success` → 最近成功工具
+- `skill:user_123:web_search` → 已掌握的技能
+
+缓存设置有 TTL，避免无限膨胀。写入时同步更新，查询时优先命中缓存，未命中则回源到持久化存储。
+
+---
+
+#### 7. 可扩展性与优化建议
+
+1. **查询结果融合**：目前各策略返回结果后简单拼接，未来可引入排序模型或规则引擎，根据置信度加权融合。
+2. **异步处理**：技能沉淀、摘要生成等重任务可放入消息队列异步执行，避免阻塞主流程。
+3. **监控与告警**：为 `EventBus` 和存储操作添加指标埋点，监控延迟和失败率。
+4. **数据归档**：Ledger 数据随时间增长，可定期归档到冷存储，热数据保留近期。
+5. **水平扩展**：Redis 和向量数据库均可集群化，`EventBus` 可基于 Kafka/NATS 实现高吞吐。
+
+---
+
+#### 8. 总结
+
+本架构通过 **分层存储 + 多级检索 + 事件溯源 + 技能沉淀** 四大支柱，实现了高效、可扩展、可回溯的 AI 记忆系统。它不仅适用于个人助手，也适用于企业级多租户 Agent 平台。
+
+架构图简版：
+![简版架构图](docs/简版架构图.png)
 
 **五层检索优先级**：KV（确定）→ Summary（模糊）→ Ledger（回溯）→ Skills（重复复用，跳过推理）→ RAG（条件性，4 种触发条件）。
 

@@ -27,3 +27,6 @@ perf_baselines.json
 .idea/
 .vscode/
 *.swp
+
+# 忽略notes文件夹下的所有内容
+notes/
